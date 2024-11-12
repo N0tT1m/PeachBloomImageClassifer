@@ -1,0 +1,7 @@
+image_classifier.log
+validated-hentai/
+training-hentai/
+results/
+.venv/
+hentai/
+.idea/

@@ -24,14 +24,68 @@ logger = logging.getLogger(__name__)
 
 
 class Config:
-    # Model settings
-    MODEL_NAME = "efficientnet_b0"
-    IMAGE_SIZE = 224
-    BATCH_SIZE = 32
-    NUM_WORKERS = 4
-    LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 50
+    YOLO_WEIGHTS = "yolov5s.pt"
+    CONFIDENCE_THRESHOLD = 0.25
+    IOU_THRESHOLD = 0.45
+    IMG_SIZE = 640
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Detailed NSFW classification categories
+    SEVERITY_LEVELS = {
+        'mild': ['suggestive', 'implied_nudity', 'partial_exposure'],
+        'moderate': ['explicit_nudity', 'erotic_pose'],
+        'extreme': ['graphic_acts', 'fetish', 'explicit_violence']
+    }
+
+    BODY_PARTS = {
+        'breasts': ['breast_exposure', 'nipple_visible', 'breast_focus'],
+        'buttocks': ['buttocks_exposure', 'anal_visible', 'buttocks_focus'],
+        'genitals': ['genital_exposure', 'genital_visible', 'genital_focus']
+    }
+
+    SEXUAL_ACTIVITIES = {
+        'intimate_contact': ['kissing', 'hugging', 'fondling'],
+        'solo_acts': ['masturbation', 'self_pleasure'],
+        'interpersonal': ['intercourse', 'oral', 'partnered_acts']
+    }
+
+    FETISH_CATEGORIES = {
+        'bondage': ['restraints', 'domination', 'submission'],
+        'furry': ['anthro', 'furry_creature', 'hybrid'],
+        'other': ['specialty_fetish', 'unusual_focus']
+    }
+
+    CONTEXTUAL_FACTORS = {
+        'consent': ['willing', 'enthusiastic', 'non_consensual'],
+        'power_dynamics': ['equal', 'dominant', 'submissive']
+    }
+
+    # Combined classes for YOLOv5 detection
+    CLASSES = [
+        # Severity
+        'suggestive', 'implied_nudity', 'partial_exposure',
+        'explicit_nudity', 'erotic_pose',
+        'graphic_acts', 'fetish',
+
+        # Body Parts
+        'breast_exposure', 'nipple_visible', 'breast_focus',
+        'buttocks_exposure', 'anal_visible', 'buttocks_focus',
+        'genital_exposure', 'genital_visible', 'genital_focus',
+
+        # Activities
+        'kissing', 'hugging', 'fondling',
+        'masturbation', 'self_pleasure',
+        'intercourse', 'oral', 'partnered_acts',
+
+        # Fetishes
+        'restraints', 'domination', 'submission',
+        'anthro', 'furry_creature', 'hybrid',
+        'specialty_fetish',
+
+        # Context
+        'willing', 'enthusiastic', 'non_consensual',
+        'equal', 'dominant', 'submissive'
+    ]
 
     # Enhanced categories with NSFW attributes
     CATEGORIES = {
@@ -41,11 +95,59 @@ class Config:
         ],
         'character_pose': [
             'standing', 'sitting', 'running', 'profile',
-            'suggestive_pose', 'intimate_pose', 'explicit_pose'
+            'suggestive_pose', 'intimate_pose', 'explicit_pose',
+            'missionary', 'doggy_style', 'cowgirl', 'reverse_cowgirl',
+            'side_position', 'sixty_nine', 'spoons', 'standing',
+            'sitting', 'laying', 'kneeling'
+        ],
+        'activity_type': [
+            'solo', 'duo', 'group', 'orgy',
+            'oral', 'penetration', 'manual', 'toys',
+            'masturbation', 'fingering', 'touching'
+        ],
+        'bdsm_elements': [
+            'none', 'bondage', 'discipline', 'dominance',
+            'submission', 'sadism', 'masochism', 'restraints',
+            'collars', 'chains', 'ropes'
+        ],
+        'fetish_focus': [
+            'none', 'feet', 'hands', 'breasts', 'buttocks',
+            'lingerie', 'costumes', 'petplay', 'furry',
+            'tentacles', 'monster', 'expansion'
+        ],
+        'group_dynamics': [
+            'solo', 'couple', 'threesome', 'group',
+            'orgy', 'swinging', 'multiple_partners'
+        ],
+        'body_exposure': [
+            'none', 'partial', 'full_front', 'full_back',
+            'explicit_front', 'explicit_back'
+        ],
+        'intimacy_level': [
+            'suggestive', 'mild', 'moderate', 'explicit',
+            'extreme', 'hardcore'
+        ],
+        'consent_indicators': [
+            'consensual', 'dubious', 'non_consensual',
+            'reluctant', 'enthusiastic'
+        ],
+        'power_dynamics': [
+            'equal', 'dominant', 'submissive',
+            'master', 'slave', 'trainer', 'pet'
+        ],
+        'body_focus': [
+            'face', 'chest', 'waist', 'hips',
+            'legs', 'feet', 'full_body', 'intimate_parts'
+        ],
+        'clothing_state': [
+            'fully_clothed', 'partially_dressed', 'lingerie',
+            'swimwear', 'nude', 'exposed'
         ],
         'scene_type': [
             'indoor', 'outdoor', 'school', 'city', 'nature',
-            'private_room', 'bath_scene', 'bedroom'
+            'private_room', 'bath_scene', 'bedroom',
+            'bedroom', 'bathroom', 'outdoor', 'dungeon',
+            'school', 'office', 'fantasy_setting'
         ],
         'emotion': ['happy', 'serious', 'surprised', 'neutral', 'seductive'],
         'clothing': [
@@ -441,6 +543,270 @@ class RobustImageDataset(Dataset):
         """Save generated labels to file"""
         with open(output_file, 'w') as f:
             json.dump({'images': self.data}, f, indent=2)
+
+class NSFWDetector:
+    def __init__(self, weights_path: str = Config.YOLO_WEIGHTS):
+        try:
+            import yolov5
+            self.model = yolov5.load(weights_path)
+            self.model.conf = Config.CONFIDENCE_THRESHOLD
+            self.model.iou = Config.IOU_THRESHOLD
+            self.model.to(Config.DEVICE)
+            logger.info("YOLOv5 NSFW detector initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize YOLOv5: {str(e)}")
+            raise
+
+        self.model.classes = list(range(len(Config.CLASSES)))
+        self.img_size = Config.IMG_SIZE
+
+    def detect(self, image_path: str) -> Dict[str, any]:
+        try:
+            results = self.model(image_path, size=self.img_size)
+
+            # Initialize detailed classification results
+            classification = {
+                'severity': self._init_category_scores(Config.SEVERITY_LEVELS),
+                'body_parts': self._init_category_scores(Config.BODY_PARTS),
+                'activities': self._init_category_scores(Config.SEXUAL_ACTIVITIES),
+                'fetishes': self._init_category_scores(Config.FETISH_CATEGORIES),
+                'context': self._init_category_scores(Config.CONTEXTUAL_FACTORS)
+            }
+
+            # Process detections
+            detections = []
+            for pred in results.pred[0]:
+                x1, y1, x2, y2, conf, cls = pred.tolist()
+                class_name = Config.CLASSES[int(cls)]
+
+                detection = {
+                    'class': class_name,
+                    'confidence': conf,
+                    'bbox': [x1, y1, x2, y2]
+                }
+                detections.append(detection)
+
+                # Update classification scores
+                self._update_classification(classification, class_name, conf)
+
+            # Determine overall ratings
+            overall_rating = self._determine_overall_rating(classification)
+
+            return {
+                'detections': detections,
+                'classification': classification,
+                'overall_rating': overall_rating,
+                'detailed_analysis': self._generate_detailed_analysis(classification)
+            }
+
+        except Exception as e:
+            logger.error(f"Error detecting NSFW content in {image_path}: {str(e)}")
+            return {
+                'detections': [],
+                'classification': self._init_empty_classification(),
+                'overall_rating': 'error',
+                'detailed_analysis': {}
+            }
+
+    def _init_category_scores(self, category_dict: Dict) -> Dict[str, float]:
+        return {category: 0.0 for category in category_dict.keys()}
+
+    def _init_empty_classification(self) -> Dict:
+        return {
+            'severity': self._init_category_scores(Config.SEVERITY_LEVELS),
+            'body_parts': self._init_category_scores(Config.BODY_PARTS),
+            'activities': self._init_category_scores(Config.SEXUAL_ACTIVITIES),
+            'fetishes': self._init_category_scores(Config.FETISH_CATEGORIES),
+            'context': self._init_category_scores(Config.CONTEXTUAL_FACTORS)
+        }
+
+    def _update_classification(self, classification: Dict, class_name: str, confidence: float):
+        # Update severity
+        for severity, classes in Config.SEVERITY_LEVELS.items():
+            if class_name in classes:
+                classification['severity'][severity] = max(
+                    classification['severity'][severity],
+                    confidence
+                )
+
+        # Update body parts
+        for part, classes in Config.BODY_PARTS.items():
+            if class_name in classes:
+                classification['body_parts'][part] = max(
+                    classification['body_parts'][part],
+                    confidence
+                )
+
+        # Update activities
+        for activity, classes in Config.SEXUAL_ACTIVITIES.items():
+            if class_name in classes:
+                classification['activities'][activity] = max(
+                    classification['activities'][activity],
+                    confidence
+                )
+
+        # Update fetishes
+        for fetish, classes in Config.FETISH_CATEGORIES.items():
+            if class_name in classes:
+                classification['fetishes'][fetish] = max(
+                    classification['fetishes'][fetish],
+                    confidence
+                )
+
+        # Update contextual factors
+        for factor, classes in Config.CONTEXTUAL_FACTORS.items():
+            if class_name in classes:
+                classification['context'][factor] = max(
+                    classification['context'][factor],
+                    confidence
+                )
+
+    def _determine_overall_rating(self, classification: Dict) -> str:
+        severity_scores = classification['severity']
+
+        if severity_scores['extreme'] > Config.CONFIDENCE_THRESHOLD:
+            return 'extreme'
+        elif severity_scores['moderate'] > Config.CONFIDENCE_THRESHOLD:
+            return 'moderate'
+        elif severity_scores['mild'] > Config.CONFIDENCE_THRESHOLD:
+            return 'mild'
+        return 'safe'
+
+    def _generate_detailed_analysis(self, classification: Dict) -> Dict:
+        """Generate detailed content analysis summary"""
+        return {
+            'primary_focus': self._determine_primary_focus(classification),
+            'content_warnings': self._generate_content_warnings(classification),
+            'tag_suggestions': self._generate_tags(classification)
+        }
+
+    def _determine_primary_focus(self, classification: Dict) -> List[str]:
+        """Determine main focus areas of the image"""
+        focus_areas = []
+        threshold = Config.CONFIDENCE_THRESHOLD
+
+        # Check each category for high confidence scores
+        for category, scores in classification.items():
+            for subcategory, score in scores.items():
+                if score > threshold:
+                    focus_areas.append(f"{subcategory} ({score:.2f})")
+
+        return sorted(focus_areas, key=lambda x: float(x.split('(')[1][:-1]), reverse=True)
+
+    def _generate_content_warnings(self, classification: Dict) -> List[str]:
+        """Generate list of content warnings based on detections"""
+        warnings = []
+        threshold = Config.CONFIDENCE_THRESHOLD
+
+        # Check for extreme content
+        if classification['severity']['extreme'] > threshold:
+            warnings.append("EXTREME: Contains graphic or intense content")
+
+        # Check for specific content warnings
+        if classification['context']['non_consensual'] > threshold:
+            warnings.append("WARNING: May contain non-consensual elements")
+
+        # Add other relevant warnings based on detections
+        for category, scores in classification.items():
+            for subcategory, score in scores.items():
+                if score > threshold and subcategory in [
+                    'explicit_nudity', 'graphic_acts', 'fetish',
+                    'genital_exposure', 'explicit_violence'
+                ]:
+                    warnings.append(f"Contains {subcategory.replace('_', ' ')}")
+
+        return warnings
+
+    def _generate_tags(self, classification: Dict) -> List[str]:
+        """Generate relevant tags for the image"""
+        tags = []
+        threshold = Config.CONFIDENCE_THRESHOLD
+
+        for category, scores in classification.items():
+            for subcategory, score in scores.items():
+                if score > threshold:
+                    tags.append(subcategory.replace('_', ' '))
+
+        return sorted(tags)
+
+
+class NSFWDatasetProcessor:
+    def __init__(self):
+        self.detector = NSFWDetector()
+
+    def process_directory(self,
+                          input_dir: str,
+                          output_file: str,
+                          organize_by_rating: bool = False,
+                          output_dir: Optional[str] = None):
+        input_path = Path(input_dir)
+        results = {
+            "images": [],
+            "statistics": {
+                "total": 0,
+                "by_rating": {"safe": 0, "mild": 0, "moderate": 0, "extreme": 0, "error": 0},
+                "by_category": {
+                    category: {subcategory: 0 for subcategory in subcategories}
+                    for category, subcategories in {
+                        'severity': Config.SEVERITY_LEVELS,
+                        'body_parts': Config.BODY_PARTS,
+                        'activities': Config.SEXUAL_ACTIVITIES,
+                        'fetishes': Config.FETISH_CATEGORIES,
+                        'context': Config.CONTEXTUAL_FACTORS
+                    }.items()
+                }
+            }
+        }
+
+        # Setup output directories if organizing files
+        if organize_by_rating and output_dir:
+            output_path = Path(output_dir)
+            for rating in ['safe', 'mild', 'moderate', 'extreme']:
+                (output_path / rating).mkdir(parents=True, exist_ok=True)
+
+        # Process images
+        image_files = list(input_path.glob('*.[jp][pn][g]'))
+        for img_path in tqdm(image_files, desc="Processing images"):
+            try:
+                # Run detection
+                result = self.detector.detect(str(img_path))
+
+                # Update statistics
+                results['statistics']['total'] += 1
+                results['statistics']['by_rating'][result['overall_rating']] += 1
+
+                # Update category statistics
+                for category, scores in result['classification'].items():
+                    for subcategory, score in scores.items():
+                        if score > Config.CONFIDENCE_THRESHOLD:
+                            results['statistics']['by_category'][category][subcategory] += 1
+
+                # Add to results
+                image_result = {
+                    "file_name": img_path.name,
+                    "overall_rating": result['overall_rating'],
+                    "classification": result['classification'],
+                    "detailed_analysis": result['detailed_analysis']
+                }
+                results["images"].append(image_result)
+
+                # Move file if organizing
+                if organize_by_rating and output_dir:
+                    dest_dir = Path(output_dir) / result['overall_rating']
+                    dest_path = dest_dir / img_path.name
+
+                    if not dest_path.exists():
+                        img_path.rename(dest_path)
+
+            except Exception as e:
+                logger.error(f"Error processing {img_path}: {str(e)}")
+                results['statistics']['by_rating']['error'] += 1
+
+        # Save results
+        with open(output_file, 'w') as f:
+            json.dump(results, f, indent=2)
+
+        return results
 
 class RobustImageClassifier(nn.Module):
     def __init__(self, num_classes_dict):
@@ -1170,13 +1536,53 @@ def example_model_training():
         logger.error(f"Error in model training: {str(e)}")
         raise
 
+def main():
+    # Setup logging and results directory
+    setup_logging()
+    results_dir = create_results_directory()
+
+    # Parse command line arguments (you may want to add argparse)
+    input_dir = "./hentai"  # Directory with images to process
+    train_dir = "./training-hentai"  # Training data directory
+    val_dir = "./validated-hentai"  # Validation data directory
+    model_path = "best_model.pth"  # Path to save/load model
+
+    try:
+        # Initialize pipeline
+        pipeline = ImageClassificationPipeline(model_path if os.path.exists(model_path) else None)
+
+        # Train model if directories exist
+        if os.path.exists(train_dir) and os.path.exists(val_dir):
+            trained_model = pipeline.train_model(
+                train_dir=train_dir,
+                val_dir=val_dir,
+                num_epochs=Config.NUM_EPOCHS
+            )
+            torch.save(trained_model.state_dict(), results_dir / "final_model.pth")
+            save_model_info(trained_model, results_dir)
+
+        # Process directory of images
+        results = pipeline.process_directory(
+            input_dir,
+            results_dir / "predictions.json"
+        )
+
+        # Generate report and visualizations
+        report = generate_report(results, results_dir)
+        visualize_results(results, results_dir)
+
+        # Print summary
+        print(f"\nTotal images processed: {report['summary']['total_images']}")
+        for category, stats in report['category_statistics'].items():
+            print(f"\n{category}:")
+            print(f"Most common: {stats['most_common']}")
+            print("Distribution:")
+            for label, percentage in stats['distribution'].items():
+                print(f"  {label}: {percentage:.1%}")
+
+    except Exception as e:
+        logger.error(f"Error in pipeline: {str(e)}")
+        raise
+
 if __name__ == "__main__":
-    # Example usage
-    # print("Processing single image...")
-    # example_single_image()
-
-    print("\nProcessing directory...")
-    example_directory_processing()
-
-    print("\nTraining model...")
-    example_model_training()
+    main()
